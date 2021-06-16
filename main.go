@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -49,23 +50,50 @@ type Table struct {
 	pager    *Pager
 }
 
+func check(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
+
 type Statement struct {
 	smt_type statement_type
 	row      Row
 }
 
-func row_slot(t *Table, row_num uint) (*Row, error) {
+type Cursor struct {
+	t            *Table
+	row_num      uint
+	end_of_table bool
+}
+
+func (c *Cursor) Value() (*Row, error) {
+	row_num := c.row_num
 	page_num := row_num / MAX_ROW_PER_PAGE
 	if page_num >= MAX_PAGE_PER_TABLE {
 		return nil, errors.New("table full")
 	}
-
-	page := t.pager.pages[row_num/MAX_ROW_PER_PAGE]
-	if page == nil {
-		t.pager.pages[row_num/MAX_ROW_PER_PAGE] = make([]Row, MAX_ROW_PER_PAGE)
-		page = t.pager.pages[row_num/MAX_ROW_PER_PAGE]
+	page, err := c.t.pager.get_page(row_num / MAX_ROW_PER_PAGE)
+	if err != nil {
+		panic(err)
 	}
 	return &page[row_num%MAX_ROW_PER_PAGE], nil
+}
+
+func (c *Cursor) Advance() {
+	c.row_num++
+	if c.row_num == uint(c.t.num_rows) {
+		c.end_of_table = true
+	}
+}
+func (tab *Table) Start_cursor() *Cursor {
+	res := Cursor{t: tab, row_num: 0, end_of_table: tab.num_rows == 0}
+	return &res
+}
+
+func (tab *Table) End_cursor() *Cursor {
+	res := Cursor{t: tab, row_num: uint(tab.num_rows), end_of_table: true}
+	return &res
 }
 
 func to_byte(p unsafe.Pointer, n int) []byte {
@@ -84,13 +112,17 @@ func (p *Pager) get_page(page_num uint) ([]Row, error) {
 			panic(err)
 		}
 		cur_page := file_len.Size() / PAGE_SZ
+		if file_len.Size()%PAGE_SZ != 0 {
+			cur_page++
+		}
+		page = p.pages[page_num]
 		if int64(page_num) < cur_page {
-			n, err := p.fd.ReadAt(to_byte(unsafe.Pointer(&page), 4096), int64(page_num*PAGE_SZ))
-			if err != nil || n != PAGE_SZ {
+			n, err := p.fd.ReadAt(to_byte(unsafe.Pointer(&page[0]), 4096), int64(page_num*PAGE_SZ))
+			if err != nil && err != io.EOF {
+				fmt.Println("read ", n)
 				panic(err)
 			}
 		}
-		page = p.pages[page_num]
 	}
 	return page, nil
 }
@@ -172,7 +204,7 @@ func execute_statement(t *Table, smt Statement) {
 		if t.num_rows > MAX_ROW_PER_TABLE {
 			panic("table full")
 		}
-		cur_row, err := row_slot(t, uint(t.num_rows))
+		cur_row, err := t.End_cursor().Value()
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -183,13 +215,12 @@ func execute_statement(t *Table, smt Statement) {
 
 	select_func := func() {
 		fmt.Println()
-		for i := 0; i < int(t.num_rows); i++ {
-			row, err := row_slot(t, uint(i))
-			if err != nil {
-				fmt.Println(err)
-				return
-			}
+		cur := t.Start_cursor()
+		for !cur.end_of_table {
+			row, err := cur.Value()
+			check(err)
 			fmt.Println(*row)
+			cur.Advance()
 		}
 		fmt.Print(PROMPT)
 	}
@@ -211,10 +242,8 @@ func open_DB(file string) *Table {
 	}
 	pager := Pager{fd: fd}
 	length, err := fd.Stat()
-	if err != nil {
-		panic(err)
-	}
-	if length.Size()%PAGE_SZ != 0 {
+	check(err)
+	if length.Size()%int64(unsafe.Sizeof(Row{})) != 0 {
 		panic("databse file error")
 	}
 	db := Table{uint32(length.Size()) / uint32(unsafe.Sizeof(Row{})), &pager}
@@ -223,17 +252,17 @@ func open_DB(file string) *Table {
 
 func close_DB(t *Table) {
 	full_pages := t.num_rows / MAX_ROW_PER_PAGE
-	if t.num_rows%MAX_ROW_PER_PAGE != 0 {
-		full_pages++
-	}
-	fmt.Println(full_pages, " pages to flush", t.num_rows)
 	for i := 0; i < int(full_pages); i++ {
 		t.pager.flush_page(i)
 	}
-	err := t.pager.fd.Close()
-	if err != nil {
-		panic(err)
+	// * flush rows not in a full page
+	if t.num_rows%MAX_ROW_PER_PAGE != 0 {
+		page := t.pager.pages[full_pages]
+		_, err := t.pager.fd.WriteAt(to_byte(unsafe.Pointer(&page[0]), (int(t.num_rows)%MAX_ROW_PER_PAGE)*int(unsafe.Sizeof(Row{}))), int64(full_pages*PAGE_SZ))
+		check(err)
 	}
+	err := t.pager.fd.Close()
+	check(err)
 }
 
 func handle_request(input string, T *Table) {
@@ -241,9 +270,7 @@ func handle_request(input string, T *Table) {
 		do_meta_command(T, input)
 	} else {
 		smt, err := prepare_statement(input)
-		if err != nil {
-			return
-		}
+		check(err)
 		execute_statement(T, smt)
 	}
 }

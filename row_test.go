@@ -6,22 +6,31 @@ import (
 )
 
 func TestRow(t *testing.T) {
-	table := Table{}
-	for i := 0; i < 100000; i++ {
+	table := open_DB("stu.db")
+	for i := 0; i < 10000; i++ {
 		query := fmt.Sprintf("insert %d vega lee@qq.com", i)
 		smt, err := prepare_statement(query)
 		if err != nil {
 			fmt.Println("invalid age")
 		}
-		execute_statement(&table, smt)
+		execute_statement(table, smt)
 	}
+	query := ".exit"
+	smt, err := prepare_statement(query)
+	if err != nil {
+		fmt.Println("invalid age")
+	}
+	execute_statement(table, smt)
+
+	table = open_DB("stu.db")
+
 	expect := Row{}
 	expect.id = 20
 	arr_copy(expect.name[:], []byte("vega"))
 	arr_copy(expect.email[:], []byte("lee@qq.com"))
 
 	for i := 0; i < int(table.num_rows); i++ {
-		cur, err := row_slot(&table, uint(i))
+		cur, err := row_slot(table, uint(i))
 		if err != nil {
 			t.Fatal("error")
 		}
