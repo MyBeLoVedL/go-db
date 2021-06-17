@@ -47,8 +47,8 @@ import (
 func TestSerialize(t *testing.T) {
 	// table := open_DB("stu.db")
 	root := LeafNode{node: Node{1, true, 0}, cell_nums: 2}
-	root.cells = append(root.cells, Cell{7, Row{21, [56]byte{0, 1}, [64]byte{2, 3}}})
-	root.cells = append(root.cells, Cell{9, Row{22, [56]byte{1, 1}, [64]byte{3, 3}}})
+	root.cells[0] = Cell{7, Row{21, [56]byte{0, 1}, [64]byte{2, 3}}}
+	root.cells[1] = Cell{9, Row{22, [56]byte{1, 1}, [64]byte{3, 3}}}
 	// fmt.Println(data)
 	data := deserialize_leaf_node_into_page(&root)
 	ne := serialize_into_leaf_node(data)

@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -20,15 +19,16 @@ const (
 )
 
 const (
-	MAX_ID_LEN         = 8
-	MAX_NAME_LEN       = 56
-	MAX_EMAIL_LEN      = 64
-	MAX_PAGE_PER_TABLE = 1024
-	PAGE_SZ            = 4096
-	MAX_ROW_PER_TABLE  = MAX_ROW_PER_PAGE * MAX_PAGE_PER_TABLE
-	MAX_ROW_PER_PAGE   = PAGE_SZ / (MAX_ID_LEN + MAX_EMAIL_LEN + MAX_NAME_LEN)
-	LEAF_NODE          = 1
-	INTERNAL_NODE      = 2
+	MAX_ID_LEN             = 8
+	MAX_NAME_LEN           = 56
+	MAX_EMAIL_LEN          = 64
+	MAX_PAGE_PER_TABLE     = 1024
+	PAGE_SZ                = 4096
+	ROW_SIZE               = 128
+	CELL_SIZE              = ROW_SIZE + 4
+	MAX_CELL_PER_LEAF_NODE = (PAGE_SZ - 10) / CELL_SIZE
+	LEAF_NODE              = 1
+	INTERNAL_NODE          = 2
 )
 
 type statement_type uint
@@ -44,13 +44,14 @@ func (r Row) String() string {
 }
 
 type Pager struct {
-	fd    *os.File
-	pages [MAX_PAGE_PER_TABLE][]Row
+	fd       *os.File
+	pages    [MAX_PAGE_PER_TABLE]*LeafNode
+	page_num uint32
 }
 
 type Table struct {
-	num_rows uint32
-	pager    *Pager
+	root_page uint32
+	pager     *Pager
 }
 
 type Node struct {
@@ -67,7 +68,7 @@ type Cell struct {
 type LeafNode struct {
 	node      Node
 	cell_nums uint32
-	cells     []Cell
+	cells     [MAX_CELL_PER_LEAF_NODE]Cell
 }
 
 func serialize_into_leaf_node(page []byte) *LeafNode {
@@ -82,12 +83,10 @@ func serialize_into_leaf_node(page []byte) *LeafNode {
 	cell_size := unsafe.Sizeof(Row{}) + 4
 	res.node.parent = binary.LittleEndian.Uint32(page[2:6])
 	res.cell_nums = binary.LittleEndian.Uint32(page[6:10])
-	cell := Cell{}
 	for i := 0; i < int(res.cell_nums); i++ {
 		cur := header_size + i*int(cell_size)
-		cell.key = binary.LittleEndian.Uint32(page[cur : cur+4])
-		cell.value = *(*Row)(unsafe.Pointer(&page[cur+4]))
-		res.cells = append(res.cells, cell)
+		res.cells[i].key = binary.LittleEndian.Uint32(page[cur : cur+4])
+		res.cells[i].value = *(*Row)(unsafe.Pointer(&page[cur+4]))
 	}
 	return &res
 }
@@ -125,80 +124,79 @@ type Statement struct {
 
 type Cursor struct {
 	t            *Table
-	row_num      uint
+	page_num     uint32
+	cell_num     uint32
 	end_of_table bool
 }
 
-func (c *Cursor) Value() (*Row, error) {
-	row_num := c.row_num
-	page_num := row_num / MAX_ROW_PER_PAGE
-	if page_num >= MAX_PAGE_PER_TABLE {
-		return nil, errors.New("table full")
+func (c *Cursor) Value() (*Cell, error) {
+	page, err := c.t.pager.get_page(uint(c.page_num))
+	check(err)
+	if page == nil {
+		panic("nil")
 	}
-	page, err := c.t.pager.get_page(row_num / MAX_ROW_PER_PAGE)
-	if err != nil {
-		panic(err)
-	}
-	return &page[row_num%MAX_ROW_PER_PAGE], nil
+	return &page.cells[c.cell_num], nil
 }
 
 func (c *Cursor) Advance() {
-	c.row_num++
-	if c.row_num == uint(c.t.num_rows) {
+	c.cell_num++
+	page, err := c.t.pager.get_page(uint(c.page_num))
+	check(err)
+	if c.cell_num == page.cell_nums {
 		c.end_of_table = true
 	}
 }
+
 func (tab *Table) Start_cursor() *Cursor {
-	res := Cursor{t: tab, row_num: 0, end_of_table: tab.num_rows == 0}
+	res := Cursor{t: tab, page_num: tab.root_page}
 	return &res
 }
 
 func (tab *Table) End_cursor() *Cursor {
-	res := Cursor{t: tab, row_num: uint(tab.num_rows), end_of_table: true}
+	page, err := tab.pager.get_page(uint(tab.root_page))
+	check(err)
+	res := Cursor{t: tab, page_num: tab.root_page, cell_num: page.cell_nums, end_of_table: true}
 	return &res
 }
 
-func to_byte(p unsafe.Pointer, n int) []byte {
-	return (*[PAGE_SZ]byte)(p)[:n]
-}
+// func to_byte(p unsafe.Pointer, n int) []byte {
+// 	return (*[PAGE_SZ]byte)(p)[:n]
+// }
 
-func (p *Pager) get_page(page_num uint) ([]Row, error) {
+func (p *Pager) get_page(page_num uint) (*LeafNode, error) {
 	if page_num > MAX_PAGE_PER_TABLE {
 		return nil, errors.New("requested page exceeds max page")
 	}
-	page := p.pages[page_num]
-	if page == nil {
-		p.pages[page_num] = make([]Row, MAX_ROW_PER_PAGE)
-		file_len, err := p.fd.Stat()
-		if err != nil {
-			panic(err)
+	node := p.pages[page_num]
+	if node == nil {
+		info, err := p.fd.Stat()
+		check(err)
+		if info.Size()%PAGE_SZ != 0 {
+			panic("bad file length")
 		}
-		cur_page := file_len.Size() / PAGE_SZ
-		if file_len.Size()%PAGE_SZ != 0 {
-			cur_page++
+		tot_pages := info.Size() / PAGE_SZ
+		if page_num < uint(tot_pages) {
+			page := make([]byte, PAGE_SZ)
+			_, err := p.fd.ReadAt(page, int64(page_num)*PAGE_SZ)
+			check(err)
+			node = serialize_into_leaf_node(page)
+		} else {
+			node = &LeafNode{node: Node{LEAF_NODE, false, 0}, cell_nums: 0}
+			p.page_num = uint32(page_num + 1)
 		}
-		page = p.pages[page_num]
-		if int64(page_num) < cur_page {
-			n, err := p.fd.ReadAt(to_byte(unsafe.Pointer(&page[0]), 4096), int64(page_num*PAGE_SZ))
-			if err != nil && err != io.EOF {
-				fmt.Println("read ", n)
-				panic(err)
-			}
-		}
+		p.pages[page_num] = node
 	}
-	return page, nil
+	return node, nil
 }
 
 func (p *Pager) flush_page(page_num int) {
 	if page_num > MAX_PAGE_PER_TABLE || p.pages[page_num] == nil {
 		return
 	}
-	page := p.pages[page_num]
-	n, err := p.fd.WriteAt(to_byte(unsafe.Pointer(&page[0]), 4096), int64(page_num*PAGE_SZ))
-	// fmt.Printf("%v %v %v\n", page[0].id, page[0].email, page[0].name)
-	if err != nil {
-		panic(err)
-	}
+	page, err := p.get_page(uint(page_num))
+	check(err)
+	n, err := p.fd.WriteAt(deserialize_leaf_node_into_page(page), int64(page_num*PAGE_SZ))
+	check(err)
 	if n != PAGE_SZ {
 		panic("partially flush a page")
 	}
@@ -263,16 +261,17 @@ handle_err:
 
 func execute_statement(t *Table, smt Statement) {
 	insert_func := func() {
-		if t.num_rows > MAX_ROW_PER_TABLE {
-			panic("table full")
+		cursor := t.End_cursor()
+		if t == nil || cursor == nil {
+			panic("nil")
 		}
-		cur_row, err := t.End_cursor().Value()
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-		row_copy(cur_row, &smt.row)
-		t.num_rows++
+		cur_row, err := cursor.Value()
+		check(err)
+		cur_row.key = uint32(smt.row.id)
+		row_copy(&cur_row.value, &smt.row)
+		page, err := t.pager.get_page(uint(cursor.page_num))
+		check(err)
+		page.cell_nums++
 	}
 
 	select_func := func() {
@@ -281,7 +280,7 @@ func execute_statement(t *Table, smt Statement) {
 		for !cur.end_of_table {
 			row, err := cur.Value()
 			check(err)
-			fmt.Println(*row)
+			fmt.Println((*row).value)
 			cur.Advance()
 		}
 		fmt.Print(PROMPT)
@@ -302,27 +301,24 @@ func open_DB(file string) *Table {
 	if err != nil {
 		panic(err)
 	}
-	pager := Pager{fd: fd}
 	length, err := fd.Stat()
 	check(err)
-	if length.Size()%int64(unsafe.Sizeof(Row{})) != 0 {
+	if length.Size()%PAGE_SZ != 0 {
 		panic("databse file error")
 	}
-	db := Table{uint32(length.Size()) / uint32(unsafe.Sizeof(Row{})), &pager}
+	pager := Pager{fd: fd, page_num: uint32(length.Size()) / PAGE_SZ}
+	db := Table{0, &pager}
 	return &db
 }
 
 func close_DB(t *Table) {
-	full_pages := t.num_rows / MAX_ROW_PER_PAGE
-	for i := 0; i < int(full_pages); i++ {
-		t.pager.flush_page(i)
-	}
+	// * for now,only one node for a table
+	// full_pages := t.num_rows / MAX_ROW_PER_PAGE
+	// for i := 0; i < int(full_pages); i++ {
+	// 	t.pager.flush_page(i)
+	// }
 	// * flush rows not in a full page
-	if t.num_rows%MAX_ROW_PER_PAGE != 0 {
-		page := t.pager.pages[full_pages]
-		_, err := t.pager.fd.WriteAt(to_byte(unsafe.Pointer(&page[0]), (int(t.num_rows)%MAX_ROW_PER_PAGE)*int(unsafe.Sizeof(Row{}))), int64(full_pages*PAGE_SZ))
-		check(err)
-	}
+	t.pager.flush_page(int(t.root_page))
 	err := t.pager.fd.Close()
 	check(err)
 }
@@ -343,7 +339,7 @@ func handle_request(input string, T *Table) {
 func main() {
 	scan := bufio.NewScanner(os.Stdin)
 	T := open_DB("stu.db")
-	// fmt.Println(unsafe.Sizeof(Row{}), MAX_ROW_PER_PAGE)
+	fmt.Println(unsafe.Sizeof(LeafNode{}))
 	for {
 		fmt.Print(PROMPT)
 		scan.Scan()
