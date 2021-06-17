@@ -9,7 +9,7 @@ import (
 func TestRow(t *testing.T) {
 	os.Truncate("stu.db", 0)
 	table := open_DB("stu.db")
-	for i := 0; i < 31; i++ {
+	for i := 0; i < 30; i++ {
 		query := fmt.Sprintf("insert %d vega lee@qq.com", i)
 		smt, err := prepare_statement(query)
 		if err != nil {

@@ -71,6 +71,27 @@ type LeafNode struct {
 	cells     [MAX_CELL_PER_LEAF_NODE]Cell
 }
 
+func (l *LeafNode) bi_search(K uint32) uint32 {
+	lower, upper := 0, int(l.cell_nums)-1
+	if upper < 0 {
+		return 0
+	}
+	if K > l.cells[upper].key {
+		return uint32(upper) + 1
+	}
+	for lower <= upper {
+		mid := (upper + lower/2)
+		if l.cells[mid].key == K {
+			return uint32(mid)
+		} else if l.cells[mid].key < K {
+			lower = mid + 1
+		} else if l.cells[mid].key > K {
+			upper = mid - 1
+		}
+	}
+	return uint32(lower)
+}
+
 func serialize_into_leaf_node(page []byte) *LeafNode {
 	res := LeafNode{}
 	res.node.node_type = page[0]
@@ -109,6 +130,23 @@ func deserialize_leaf_node_into_page(node *LeafNode) []byte {
 		arr_copy(res[cur+4:cur+int(cell_size)], ((*[PAGE_SZ]byte)(unsafe.Pointer(&(node.cells[i].value))))[0:cell_size-4])
 	}
 	return res
+}
+
+func (tab *Table) bi_search(K uint32) *Cursor {
+	page, err := tab.pager.get_page(uint(tab.root_page))
+	check(err)
+	index := page.bi_search(uint32(K))
+	res := Cursor{t: tab, page_num: tab.root_page, cell_num: index}
+	return &res
+}
+
+func (l *LeafNode) insert_cell(cursor *Cursor, cell *Cell) {
+	cur := cursor.cell_num
+	for i := int32(l.cell_nums - 1); i >= int32(cur); i-- {
+		// fmt.Println("i", i, cur)
+		l.cells[i+1] = l.cells[i]
+	}
+	l.cells[cur] = *cell
 }
 
 func check(err error) {
@@ -155,13 +193,6 @@ func (tab *Table) Start_cursor() *Cursor {
 	page, err := tab.pager.get_page(uint(tab.root_page))
 	check(err)
 	res := Cursor{t: tab, page_num: tab.root_page, end_of_table: page.cell_nums == 0}
-	return &res
-}
-
-func (tab *Table) End_cursor() *Cursor {
-	page, err := tab.pager.get_page(uint(tab.root_page))
-	check(err)
-	res := Cursor{t: tab, page_num: tab.root_page, cell_num: page.cell_nums, end_of_table: true}
 	return &res
 }
 
@@ -267,20 +298,14 @@ handle_err:
 
 func execute_statement(t *Table, smt Statement) {
 	insert_func := func() {
-		cursor := t.End_cursor()
-		cur_row, err := cursor.Value()
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-		cur_row.key = uint32(smt.row.id)
-		row_copy(&cur_row.value, &smt.row)
+		cursor := t.bi_search(uint32(smt.row.id))
+		// fmt.Println("cursor: ", cursor.page_num, cursor.cell_num)
 		page, err := t.pager.get_page(uint(cursor.page_num))
 		check(err)
+		page.insert_cell(cursor, &Cell{uint32(smt.row.id), smt.row})
 		page.cell_nums++
 	}
 
-	// fmt.Println("~~~~~~~~~~~~~~~")
 	select_func := func() {
 		fmt.Println()
 		cur := t.Start_cursor()
