@@ -142,11 +142,45 @@ func (tab *Table) bi_search(K uint32) *Cursor {
 
 func (l *LeafNode) insert_cell(cursor *Cursor, cell *Cell) {
 	cur := cursor.cell_num
+
 	for i := int32(l.cell_nums - 1); i >= int32(cur); i-- {
 		// fmt.Println("i", i, cur)
 		l.cells[i+1] = l.cells[i]
 	}
 	l.cells[cur] = *cell
+}
+
+// * split a leaf node ,not the internal node
+func (l *LeafNode) insert_cell_and_split(cursor *Cursor, cell *Cell) {
+	oldpage, err := cursor.t.pager.get_page(uint(cursor.page_num))
+	check(err)
+	// * allocate a new page
+	newpage, err := cursor.t.pager.get_page(uint(cursor.t.pager.page_num))
+	check(err)
+	cursor.t.pager.page_num++
+
+	var dst_node *LeafNode
+	var index uint32
+	left_cells := (MAX_CELL_PER_LEAF_NODE + 1) / 2
+	right_cells := MAX_CELL_PER_LEAF_NODE + 1 - left_cells
+	for i := MAX_CELL_PER_LEAF_NODE; i >= 0; i-- {
+		if i >= left_cells {
+			dst_node = newpage
+			index = uint32(i - left_cells)
+		} else {
+			dst_node = oldpage
+			index = uint32(i)
+		}
+		if uint32(i) == cursor.cell_num {
+			dst_node.cells[index] = *cell
+		} else if uint32(i) > cursor.cell_num {
+			dst_node.cells[index] = oldpage.cells[i-1]
+		} else {
+			dst_node.cells[index] = oldpage.cells[i]
+		}
+	}
+	oldpage.cell_nums = uint32(left_cells)
+	newpage.cell_nums = uint32(right_cells)
 }
 
 func check(err error) {
@@ -260,11 +294,11 @@ func arr_copy(dst, src []byte) {
 	}
 }
 
-func row_copy(dst, src *Row) {
-	dst.id = src.id
-	arr_copy(dst.name[:], src.name[:])
-	arr_copy(dst.email[:], src.email[:])
-}
+// func row_copy(dst, src *Row) {
+// 	dst.id = src.id
+// 	arr_copy(dst.name[:], src.name[:])
+// 	arr_copy(dst.email[:], src.email[:])
+// }
 
 func prepare_statement(smt string) (Statement, error) {
 	var ret_smt Statement
@@ -302,7 +336,12 @@ func execute_statement(t *Table, smt Statement) {
 		// fmt.Println("cursor: ", cursor.page_num, cursor.cell_num)
 		page, err := t.pager.get_page(uint(cursor.page_num))
 		check(err)
-		page.insert_cell(cursor, &Cell{uint32(smt.row.id), smt.row})
+		// * split leaf node , insert this cell into appopiate page
+		if cursor.cell_num == MAX_CELL_PER_LEAF_NODE {
+			page.insert_cell_and_split(cursor, &Cell{uint32(smt.row.id), smt.row})
+		} else {
+			page.insert_cell(cursor, &Cell{uint32(smt.row.id), smt.row})
+		}
 		page.cell_nums++
 	}
 
