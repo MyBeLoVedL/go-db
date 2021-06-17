@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +27,8 @@ const (
 	PAGE_SZ            = 4096
 	MAX_ROW_PER_TABLE  = MAX_ROW_PER_PAGE * MAX_PAGE_PER_TABLE
 	MAX_ROW_PER_PAGE   = PAGE_SZ / (MAX_ID_LEN + MAX_EMAIL_LEN + MAX_NAME_LEN)
+	LEAF_NODE          = 1
+	INTERNAL_NODE      = 2
 )
 
 type statement_type uint
@@ -48,6 +51,65 @@ type Pager struct {
 type Table struct {
 	num_rows uint32
 	pager    *Pager
+}
+
+type Node struct {
+	node_type uint8
+	is_root   bool
+	parent    uint32
+}
+
+type Cell struct {
+	key   uint32
+	value Row
+}
+
+type LeafNode struct {
+	node      Node
+	cell_nums uint32
+	cells     []Cell
+}
+
+func serialize_into_leaf_node(page []byte) *LeafNode {
+	res := LeafNode{}
+	res.node.node_type = page[0]
+	if page[1] == 0 {
+		res.node.is_root = false
+	} else {
+		res.node.is_root = true
+	}
+	header_size := 10
+	cell_size := unsafe.Sizeof(Row{}) + 4
+	res.node.parent = binary.LittleEndian.Uint32(page[2:6])
+	res.cell_nums = binary.LittleEndian.Uint32(page[6:10])
+	cell := Cell{}
+	for i := 0; i < int(res.cell_nums); i++ {
+		cur := header_size + i*int(cell_size)
+		cell.key = binary.LittleEndian.Uint32(page[cur : cur+4])
+		cell.value = *(*Row)(unsafe.Pointer(&page[cur+4]))
+		res.cells = append(res.cells, cell)
+	}
+	return &res
+}
+
+func deserialize_leaf_node_into_page(node *LeafNode) []byte {
+	res := make([]byte, PAGE_SZ)
+	res[0] = node.node.node_type
+	if node.node.is_root {
+		res[1] = 1
+	} else {
+		res[0] = 0
+	}
+	binary.LittleEndian.PutUint32(res[2:6], node.node.parent)
+	binary.LittleEndian.PutUint32(res[6:10], node.cell_nums)
+	header_size := 10
+	cell_size := unsafe.Sizeof(Row{}) + 4
+	for i := 0; i < int(node.cell_nums); i++ {
+		cur := header_size + i*int(cell_size)
+		binary.LittleEndian.PutUint32(res[cur:cur+4], node.cells[i].key)
+		arr_copy(res[cur+4:cur+int(cell_size)], ((*[PAGE_SZ]byte)(unsafe.Pointer(&(node.cells[i].value))))[0:cell_size-4])
+	}
+	return res
 }
 
 func check(err error) {
@@ -270,7 +332,10 @@ func handle_request(input string, T *Table) {
 		do_meta_command(T, input)
 	} else {
 		smt, err := prepare_statement(input)
-		check(err)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
 		execute_statement(T, smt)
 	}
 }
@@ -278,7 +343,7 @@ func handle_request(input string, T *Table) {
 func main() {
 	scan := bufio.NewScanner(os.Stdin)
 	T := open_DB("stu.db")
-	fmt.Println(unsafe.Sizeof(Row{}), MAX_ROW_PER_PAGE)
+	// fmt.Println(unsafe.Sizeof(Row{}), MAX_ROW_PER_PAGE)
 	for {
 		fmt.Print(PROMPT)
 		scan.Scan()
