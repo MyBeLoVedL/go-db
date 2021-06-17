@@ -135,7 +135,11 @@ func (c *Cursor) Value() (*Cell, error) {
 	if page == nil {
 		panic("nil")
 	}
-	return &page.cells[c.cell_num], nil
+	if c.cell_num == MAX_CELL_PER_LEAF_NODE {
+		return nil, errors.New("table full")
+	} else {
+		return &page.cells[c.cell_num], nil
+	}
 }
 
 func (c *Cursor) Advance() {
@@ -148,7 +152,9 @@ func (c *Cursor) Advance() {
 }
 
 func (tab *Table) Start_cursor() *Cursor {
-	res := Cursor{t: tab, page_num: tab.root_page}
+	page, err := tab.pager.get_page(uint(tab.root_page))
+	check(err)
+	res := Cursor{t: tab, page_num: tab.root_page, end_of_table: page.cell_nums == 0}
 	return &res
 }
 
@@ -262,11 +268,11 @@ handle_err:
 func execute_statement(t *Table, smt Statement) {
 	insert_func := func() {
 		cursor := t.End_cursor()
-		if t == nil || cursor == nil {
-			panic("nil")
-		}
 		cur_row, err := cursor.Value()
-		check(err)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
 		cur_row.key = uint32(smt.row.id)
 		row_copy(&cur_row.value, &smt.row)
 		page, err := t.pager.get_page(uint(cursor.page_num))
@@ -274,6 +280,7 @@ func execute_statement(t *Table, smt Statement) {
 		page.cell_nums++
 	}
 
+	// fmt.Println("~~~~~~~~~~~~~~~")
 	select_func := func() {
 		fmt.Println()
 		cur := t.Start_cursor()
@@ -313,10 +320,6 @@ func open_DB(file string) *Table {
 
 func close_DB(t *Table) {
 	// * for now,only one node for a table
-	// full_pages := t.num_rows / MAX_ROW_PER_PAGE
-	// for i := 0; i < int(full_pages); i++ {
-	// 	t.pager.flush_page(i)
-	// }
 	// * flush rows not in a full page
 	t.pager.flush_page(int(t.root_page))
 	err := t.pager.fd.Close()

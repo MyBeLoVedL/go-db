@@ -1,48 +1,46 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"testing"
 )
 
-// func TestRow(t *testing.T) {
-// 	table := open_DB("stu.db")
-// 	for i := 0; i < 10000; i++ {
-// 		query := fmt.Sprintf("insert %d vega lee@qq.com", i)
-// 		smt, err := prepare_statement(query)
-// 		if err != nil {
-// 			fmt.Println("invalid age")
-// 		}
-// 		execute_statement(table, smt)
-// 	}
-// 	query := ".exit"
-// 	smt, err := prepare_statement(query)
-// 	if err != nil {
-// 		fmt.Println("invalid age")
-// 	}
-// 	execute_statement(table, smt)
+func TestRow(t *testing.T) {
+	os.Truncate("stu.db", 0)
+	table := open_DB("stu.db")
+	for i := 0; i < 31; i++ {
+		query := fmt.Sprintf("insert %d vega lee@qq.com", i)
+		smt, err := prepare_statement(query)
+		if err != nil {
+			fmt.Println("invalid age")
+		}
+		execute_statement(table, smt)
+	}
+	close_DB(table)
 
-// 	table = open_DB("stu.db")
+	table = open_DB("stu.db")
 
-// 	expect := Row{}
-// 	expect.id = 20
-// 	arr_copy(expect.name[:], []byte("vega"))
-// 	arr_copy(expect.email[:], []byte("lee@qq.com"))
+	expect := Row{}
+	expect.id = 20
+	arr_copy(expect.name[:], []byte("vega"))
+	arr_copy(expect.email[:], []byte("lee@qq.com"))
 
-// 	cursor := table.Start_cursor()
-// 	i := 0
-// 	for !cursor.end_of_table {
-// 		cur, err := cursor.Value()
-// 		if err != nil {
-// 			t.Fatal("error")
-// 		}
-// 		expect.id = uint64(i)
-// 		i++
-// 		if *cur != expect {
-// 			t.Errorf("[%d] expect %v\n		   got %v", i, expect, *cur)
-// 		}
-// 		cursor.Advance()
-// 	}
-// }
+	cursor := table.Start_cursor()
+	i := 0
+	for !cursor.end_of_table {
+		cur, err := cursor.Value()
+		if err != nil {
+			t.Fatal("error")
+		}
+		expect.id = uint64(i)
+		i++
+		if (*cur).value != expect {
+			t.Errorf("[%d] expect %v\n		   got %v", i, expect, (*cur).value)
+		}
+		cursor.Advance()
+	}
+}
 
 func TestSerialize(t *testing.T) {
 	// table := open_DB("stu.db")
