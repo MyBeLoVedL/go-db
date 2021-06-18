@@ -19,16 +19,18 @@ const (
 )
 
 const (
-	MAX_ID_LEN             = 8
-	MAX_NAME_LEN           = 56
-	MAX_EMAIL_LEN          = 64
-	MAX_PAGE_PER_TABLE     = 1024
-	PAGE_SZ                = 4096
-	ROW_SIZE               = 128
-	CELL_SIZE              = ROW_SIZE + 4
-	MAX_CELL_PER_LEAF_NODE = (PAGE_SZ - 10) / CELL_SIZE
-	LEAF_NODE              = 1
-	INTERNAL_NODE          = 2
+	MAX_ID_LEN                 = 8
+	MAX_NAME_LEN               = 56
+	MAX_EMAIL_LEN              = 64
+	MAX_PAGE_PER_TABLE         = 1024
+	PAGE_SZ                    = 4096
+	ROW_SIZE                   = 128
+	CELL_SIZE                  = ROW_SIZE + 4
+	INTERNAL_CELL_SIZE         = 8
+	MAX_CELL_PER_LEAF_NODE     = (PAGE_SZ - 10) / CELL_SIZE
+	MAX_CELL_PER_INTERNAL_NODE = (PAGE_SZ - 14) / INTERNAL_CELL_SIZE
+	LEAF_NODE                  = 1
+	INTERNAL_NODE              = 2
 )
 
 type statement_type uint
@@ -65,10 +67,26 @@ type Cell struct {
 	value Row
 }
 
+type InternalCell struct {
+	child uint32
+	key   uint32
+}
+
+type NodeInterface interface {
+	bi_search(K uint32) uint32
+}
+
 type LeafNode struct {
 	node      Node
 	cell_nums uint32
 	cells     [MAX_CELL_PER_LEAF_NODE]Cell
+}
+
+type InternalNode struct {
+	node            Node
+	key_nums        uint32
+	rightmost_child uint32
+	cells           [MAX_CELL_PER_INTERNAL_NODE]InternalCell
 }
 
 func (l *LeafNode) bi_search(K uint32) uint32 {
@@ -132,12 +150,31 @@ func deserialize_leaf_node_into_page(node *LeafNode) []byte {
 	return res
 }
 
+func (tab *Table) create_new_root(right_child_page uint) {
+	old_root, err := tab.pager.get_page(uint(tab.root_page))
+	check(err)
+	right_child, err := tab.pager.get_page(uint(right_child_page))
+	check(err)
+	new_root_page := tab.pager.get_avail_page()
+	new_root, err := tab.pager.get_page(uint(new_root_page))
+	check(err)
+	old_root.node.is_root = false
+	new_root.node.is_root = true
+
+}
+
 func (tab *Table) bi_search(K uint32) *Cursor {
 	page, err := tab.pager.get_page(uint(tab.root_page))
 	check(err)
 	index := page.bi_search(uint32(K))
 	res := Cursor{t: tab, page_num: tab.root_page, cell_num: index}
 	return &res
+}
+
+func (p *Pager) get_avail_page() uint32 {
+	res := p.page_num
+	p.page_num++
+	return res
 }
 
 func (l *LeafNode) insert_cell(cursor *Cursor, cell *Cell) {
@@ -155,9 +192,8 @@ func (l *LeafNode) insert_cell_and_split(cursor *Cursor, cell *Cell) {
 	oldpage, err := cursor.t.pager.get_page(uint(cursor.page_num))
 	check(err)
 	// * allocate a new page
-	newpage, err := cursor.t.pager.get_page(uint(cursor.t.pager.page_num))
+	newpage, err := cursor.t.pager.get_page(uint(cursor.t.pager.get_avail_page()))
 	check(err)
-	cursor.t.pager.page_num++
 
 	var dst_node *LeafNode
 	var index uint32
@@ -181,6 +217,8 @@ func (l *LeafNode) insert_cell_and_split(cursor *Cursor, cell *Cell) {
 	}
 	oldpage.cell_nums = uint32(left_cells)
 	newpage.cell_nums = uint32(right_cells)
+
+	// * if old page is root node, a new root node is created
 }
 
 func check(err error) {
@@ -335,9 +373,15 @@ func execute_statement(t *Table, smt Statement) {
 		cursor := t.bi_search(uint32(smt.row.id))
 		// fmt.Println("cursor: ", cursor.page_num, cursor.cell_num)
 		page, err := t.pager.get_page(uint(cursor.page_num))
+		// * check the row at cursor position collide with key , watch out , 0 key value is not supported
+		if cursor.cell_num < MAX_CELL_PER_LEAF_NODE && smt.row.id == uint64(page.cells[cursor.cell_num].key) {
+			fmt.Println("duplicate row")
+			return
+		}
 		check(err)
 		// * split leaf node , insert this cell into appopiate page
-		if cursor.cell_num == MAX_CELL_PER_LEAF_NODE {
+		// fmt.Println(cursor.cell_num)
+		if page.cell_nums == MAX_CELL_PER_LEAF_NODE {
 			page.insert_cell_and_split(cursor, &Cell{uint32(smt.row.id), smt.row})
 		} else {
 			page.insert_cell(cursor, &Cell{uint32(smt.row.id), smt.row})

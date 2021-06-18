@@ -9,8 +9,8 @@ import (
 func TestRow(t *testing.T) {
 	os.Truncate("stu.db", 0)
 	table := open_DB("stu.db")
-	for i := 0; i < 30; i++ {
-		query := fmt.Sprintf("insert %d vega lee@qq.com", i)
+	for i := 0; i < 20; i++ {
+		query := fmt.Sprintf("insert %d vega lee@qq.com", i+1)
 		smt, err := prepare_statement(query)
 		if err != nil {
 			fmt.Println("invalid age")
@@ -33,7 +33,7 @@ func TestRow(t *testing.T) {
 		if err != nil {
 			t.Fatal("error")
 		}
-		expect.id = uint64(i)
+		expect.id = uint64(i + 1)
 		i++
 		if (*cur).value != expect {
 			t.Errorf("[%d] expect %v\n		   got %v", i, expect, (*cur).value)
