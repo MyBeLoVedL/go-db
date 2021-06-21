@@ -272,6 +272,7 @@ func (tab *Table) Start_cursor() *Cursor {
 // 	return (*[PAGE_SZ]byte)(p)[:n]
 // }
 
+// todo : return diffrent types for Node
 func (p *Pager) get_page(page_num uint) (*LeafNode, error) {
 	if page_num > MAX_PAGE_PER_TABLE {
 		return nil, errors.New("requested page exceeds max page")
