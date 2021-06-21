@@ -45,10 +45,13 @@ func (r Row) String() string {
 	return fmt.Sprintf("%v %v %v", r.id, string(r.name[:]), string(r.email[:]))
 }
 
+type Page [PAGE_SZ]byte
+
 type Pager struct {
-	fd       *os.File
-	pages    [MAX_PAGE_PER_TABLE]*LeafNode
-	page_num uint32
+	fd          *os.File
+	pages       [MAX_PAGE_PER_TABLE]*Page
+	page_num    uint32
+	tree_height uint32
 }
 
 type Table struct {
@@ -68,8 +71,8 @@ type Cell struct {
 }
 
 type InternalCell struct {
-	child uint32
-	key   uint32
+	left_child uint32
+	key        uint32
 }
 
 type NodeInterface interface {
@@ -91,6 +94,48 @@ type InternalNode struct {
 
 func (l *LeafNode) bi_search(K uint32) uint32 {
 	lower, upper := 0, int(l.cell_nums)-1
+	if upper < 0 {
+		return 0
+	}
+	if K > l.cells[upper].key {
+		return uint32(upper) + 1
+	}
+	for lower <= upper {
+		mid := (upper + lower/2)
+		if l.cells[mid].key == K {
+			return uint32(mid)
+		} else if l.cells[mid].key < K {
+			lower = mid + 1
+		} else if l.cells[mid].key > K {
+			upper = mid - 1
+		}
+	}
+	return uint32(lower)
+}
+
+// ! note the case that node has no cells,which cause an indexing exception
+func (l *LeafNode) max_key() uint32 {
+	max := l.cells[0].key
+	for i := 1; i < int(l.cell_nums); i++ {
+		if l.cells[i].key > max {
+			max = l.cells[i].key
+		}
+	}
+	return max
+}
+
+func (l *InternalNode) max_key() uint32 {
+	max := l.cells[0].key
+	for i := 1; i < int(l.key_nums); i++ {
+		if l.cells[i].key > max {
+			max = l.cells[i].key
+		}
+	}
+	return max
+}
+
+func (l *InternalNode) bi_search(K uint32) uint32 {
+	lower, upper := 0, int(l.key_nums)-1
 	if upper < 0 {
 		return 0
 	}
@@ -151,20 +196,38 @@ func deserialize_leaf_node_into_page(node *LeafNode) []byte {
 }
 
 func (tab *Table) create_new_root(right_child_page uint) {
-	old_root, err := tab.pager.get_page(uint(tab.root_page))
-	check(err)
-	right_child, err := tab.pager.get_page(uint(right_child_page))
-	check(err)
+	// * for the case that root node is leaf node
+	var root_key uint32
+	if tab.pager.tree_height == 0 {
+		old_root, err := tab.pager.get_leaf_node(uint(tab.root_page))
+		check(err)
+		old_root.node.is_root = false
+		root_key = old_root.max_key()
+	} else {
+		old_root, err := tab.pager.get_internal_node(uint(tab.root_page))
+		check(err)
+		old_root.node.is_root = false
+		root_key = old_root.max_key()
+		n := old_root.key_nums
+		// * delete the rightmost cell from left child
+		old_root.rightmost_child = old_root.cells[n-1].key
+		old_root.key_nums--
+	}
 	new_root_page := tab.pager.get_avail_page()
-	new_root, err := tab.pager.get_page(uint(new_root_page))
+	new_root, err := tab.pager.get_internal_node(uint(new_root_page))
 	check(err)
-	old_root.node.is_root = false
 	new_root.node.is_root = true
+	new_root.rightmost_child = uint32(right_child_page)
+	new_root.insert_cell(&Cursor{tab, new_root_page, 0, false}, &InternalCell{tab.root_page, root_key})
+	tab.root_page = new_root_page
+
+	tab.pager.tree_height++
 
 }
 
+// todo : add recursive search
 func (tab *Table) bi_search(K uint32) *Cursor {
-	page, err := tab.pager.get_page(uint(tab.root_page))
+	page, err := tab.pager.get_leaf_node(uint(tab.root_page))
 	check(err)
 	index := page.bi_search(uint32(K))
 	res := Cursor{t: tab, page_num: tab.root_page, cell_num: index}
@@ -181,7 +244,16 @@ func (l *LeafNode) insert_cell(cursor *Cursor, cell *Cell) {
 	cur := cursor.cell_num
 
 	for i := int32(l.cell_nums - 1); i >= int32(cur); i-- {
-		// fmt.Println("i", i, cur)
+		l.cells[i+1] = l.cells[i]
+	}
+	l.cells[cur] = *cell
+}
+
+// todo : add code for splitting internal code
+func (l *InternalNode) insert_cell(cursor *Cursor, cell *InternalCell) {
+	cur := cursor.cell_num
+
+	for i := int32(l.key_nums - 1); i >= int32(cur); i-- {
 		l.cells[i+1] = l.cells[i]
 	}
 	l.cells[cur] = *cell
@@ -189,10 +261,11 @@ func (l *LeafNode) insert_cell(cursor *Cursor, cell *Cell) {
 
 // * split a leaf node ,not the internal node
 func (l *LeafNode) insert_cell_and_split(cursor *Cursor, cell *Cell) {
-	oldpage, err := cursor.t.pager.get_page(uint(cursor.page_num))
+	oldpage, err := cursor.t.pager.get_leaf_node(uint(cursor.page_num))
 	check(err)
 	// * allocate a new page
-	newpage, err := cursor.t.pager.get_page(uint(cursor.t.pager.get_avail_page()))
+	right_child_page := cursor.t.pager.get_avail_page()
+	newpage, err := cursor.t.pager.get_leaf_node(uint(right_child_page))
 	check(err)
 
 	var dst_node *LeafNode
@@ -217,8 +290,16 @@ func (l *LeafNode) insert_cell_and_split(cursor *Cursor, cell *Cell) {
 	}
 	oldpage.cell_nums = uint32(left_cells)
 	newpage.cell_nums = uint32(right_cells)
-
-	// * if old page is root node, a new root node is created
+	if cursor.t.pager.tree_height == 0 {
+		cursor.t.create_new_root(uint(right_child_page))
+	} else {
+		parent, err := cursor.t.pager.get_internal_node(uint(oldpage.node.parent))
+		check((err))
+		max := oldpage.max_key()
+		idx := parent.bi_search(max)
+		cur := Cursor{cursor.t, oldpage.node.parent, idx, false}
+		parent.insert_cell(&cur, &InternalCell{cursor.page_num, max})
+	}
 }
 
 func check(err error) {
@@ -240,7 +321,7 @@ type Cursor struct {
 }
 
 func (c *Cursor) Value() (*Cell, error) {
-	page, err := c.t.pager.get_page(uint(c.page_num))
+	page, err := c.t.pager.get_leaf_node(uint(c.page_num))
 	check(err)
 	if page == nil {
 		panic("nil")
@@ -254,7 +335,7 @@ func (c *Cursor) Value() (*Cell, error) {
 
 func (c *Cursor) Advance() {
 	c.cell_num++
-	page, err := c.t.pager.get_page(uint(c.page_num))
+	page, err := c.t.pager.get_leaf_node(uint(c.page_num))
 	check(err)
 	if c.cell_num == page.cell_nums {
 		c.end_of_table = true
@@ -262,18 +343,14 @@ func (c *Cursor) Advance() {
 }
 
 func (tab *Table) Start_cursor() *Cursor {
-	page, err := tab.pager.get_page(uint(tab.root_page))
+	page, err := tab.pager.get_leaf_node(uint(tab.root_page))
 	check(err)
 	res := Cursor{t: tab, page_num: tab.root_page, end_of_table: page.cell_nums == 0}
 	return &res
 }
 
-// func to_byte(p unsafe.Pointer, n int) []byte {
-// 	return (*[PAGE_SZ]byte)(p)[:n]
-// }
-
 // todo : return diffrent types for Node
-func (p *Pager) get_page(page_num uint) (*LeafNode, error) {
+func (p *Pager) get_raw_page(page_num uint) (*Page, error) {
 	if page_num > MAX_PAGE_PER_TABLE {
 		return nil, errors.New("requested page exceeds max page")
 	}
@@ -285,16 +362,16 @@ func (p *Pager) get_page(page_num uint) (*LeafNode, error) {
 			panic("bad file length")
 		}
 		tot_pages := info.Size() / PAGE_SZ
+		new_page := new(Page)
 		if page_num < uint(tot_pages) {
-			page := make([]byte, PAGE_SZ)
-			_, err := p.fd.ReadAt(page, int64(page_num)*PAGE_SZ)
+			n, err := p.fd.ReadAt((*new_page)[:], int64(page_num)*PAGE_SZ)
 			check(err)
-			node = serialize_into_leaf_node(page)
-		} else {
-			node = &LeafNode{node: Node{LEAF_NODE, false, 0}, cell_nums: 0}
-			p.page_num = uint32(page_num + 1)
+			if n != PAGE_SZ {
+				return nil, errors.New("error reading page")
+			}
 		}
-		p.pages[page_num] = node
+		p.pages[page_num] = new_page
+		node = new_page
 	}
 	return node, nil
 }
@@ -303,14 +380,43 @@ func (p *Pager) flush_page(page_num int) {
 	if page_num > MAX_PAGE_PER_TABLE || p.pages[page_num] == nil {
 		return
 	}
-	page, err := p.get_page(uint(page_num))
+	old_page, err := p.get_raw_page(uint(page_num))
 	check(err)
-	n, err := p.fd.WriteAt(deserialize_leaf_node_into_page(page), int64(page_num*PAGE_SZ))
+	n, err := p.fd.WriteAt((*old_page)[:], int64(page_num*PAGE_SZ))
 	check(err)
 	if n != PAGE_SZ {
 		panic("partially flush a page")
 	}
 	p.pages[page_num] = nil
+}
+
+func (p *Pager) get_leaf_node(page_num uint) (*LeafNode, error) {
+	page, err := p.get_raw_page(uint(page_num))
+	node := (*LeafNode)(unsafe.Pointer(page))
+	return node, err
+}
+
+func (p *Pager) get_internal_node(page_num uint) (*InternalNode, error) {
+	page, err := p.get_raw_page(uint(page_num))
+	node := (*InternalNode)(unsafe.Pointer(page))
+	return node, err
+}
+
+func (p *Pager) set_leaf_node(page_num int) {
+	page, err := p.get_raw_page(uint(page_num))
+	check(err)
+	node := (*LeafNode)(unsafe.Pointer(page))
+	node.node.node_type = LEAF_NODE
+	node.cell_nums = 0
+}
+
+func (p *Pager) set_internal_node(page_num int) {
+	page, err := p.get_raw_page(uint(page_num))
+	check(err)
+	node := (*InternalNode)(unsafe.Pointer(page))
+	node.node.node_type = LEAF_NODE
+	node.key_nums = 0
+
 }
 
 func do_meta_command(T *Table, op string) {
@@ -373,7 +479,7 @@ func execute_statement(t *Table, smt Statement) {
 	insert_func := func() {
 		cursor := t.bi_search(uint32(smt.row.id))
 		// fmt.Println("cursor: ", cursor.page_num, cursor.cell_num)
-		page, err := t.pager.get_page(uint(cursor.page_num))
+		page, err := t.pager.get_leaf_node(uint(cursor.page_num))
 		// * check the row at cursor position collide with key , watch out , 0 key value is not supported
 		if cursor.cell_num < MAX_CELL_PER_LEAF_NODE && smt.row.id == uint64(page.cells[cursor.cell_num].key) {
 			fmt.Println("duplicate row")
