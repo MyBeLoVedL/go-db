@@ -26,8 +26,8 @@ const (
 	ROW_SIZE                   = 128
 	CELL_SIZE                  = ROW_SIZE + 4
 	INTERNAL_CELL_SIZE         = 8
-	MAX_CELL_PER_LEAF_NODE     = (PAGE_SZ - 10) / CELL_SIZE
-	MAX_CELL_PER_INTERNAL_NODE = (PAGE_SZ - 14) / INTERNAL_CELL_SIZE
+	MAX_CELL_PER_LEAF_NODE     = (PAGE_SZ - 16) / CELL_SIZE
+	MAX_CELL_PER_INTERNAL_NODE = (PAGE_SZ - 16) / INTERNAL_CELL_SIZE
 	LEAF_NODE                  = 1
 	INTERNAL_NODE              = 2
 )
@@ -81,6 +81,7 @@ type NodeInterface interface {
 type LeafNode struct {
 	node      Node
 	cell_nums uint32
+	sibling   uint32
 	cells     [MAX_CELL_PER_LEAF_NODE]Cell
 }
 
@@ -266,6 +267,7 @@ func (l *LeafNode) insert_cell(cursor *Cursor, cell *Cell) {
 			l.cells[i+1] = l.cells[i]
 		}
 		l.cells[cell_num] = *cell
+		l.cell_nums++
 	} else { // ! branch for splitting
 		oldpage, err := cursor.t.pager.get_leaf_node(uint(cursor.page_num))
 		check(err)
@@ -296,6 +298,7 @@ func (l *LeafNode) insert_cell(cursor *Cursor, cell *Cell) {
 		}
 		oldpage.cell_nums = uint32(left_cells)
 		newpage.cell_nums = uint32(right_cells)
+		oldpage.sibling = right_child_page
 		if cursor.t.pager.tree_height == 0 {
 			cursor.t.create_new_root(uint(right_child_page))
 		} else {
@@ -317,6 +320,7 @@ func (l *InternalNode) insert_cell(cursor *Cursor, cell *InternalCell) {
 		l.cells[i+1] = l.cells[i]
 	}
 	l.cells[cell_num] = *cell
+	l.key_nums++
 }
 
 func check(err error) {
@@ -354,16 +358,19 @@ func (c *Cursor) Advance() {
 	c.cell_num++
 	page, err := c.t.pager.get_leaf_node(uint(c.page_num))
 	check(err)
-	if c.cell_num == page.cell_nums {
+	if page.sibling == 0 && c.cell_num == page.cell_nums {
 		c.end_of_table = true
 	}
+	// * reach end of node,pointing to next node
+	if c.cell_num == page.cell_nums {
+		c.page_num = page.sibling
+		c.cell_num = 0
+	}
+
 }
 
 func (tab *Table) Start_cursor() *Cursor {
-	page, err := tab.pager.get_leaf_node(uint(tab.root_page))
-	check(err)
-	res := Cursor{t: tab, page_num: tab.root_page, end_of_table: page.cell_nums == 0}
-	return &res
+	return tab.bi_search(0)
 }
 
 func (p *Pager) get_raw_page(page_num uint) (*Page, error) {
@@ -386,6 +393,8 @@ func (p *Pager) get_raw_page(page_num uint) (*Page, error) {
 				return nil, errors.New("error reading page")
 			}
 		}
+		// * set total page num
+		p.page_num = uint32(page_num + 1)
 		p.pages[page_num] = new_page
 		node = new_page
 	}
@@ -444,6 +453,12 @@ func do_meta_command(T *Table, op string) {
 		close_DB(T)
 		fmt.Println("Database closed")
 		os.Exit(1)
+	case ".param":
+		fmt.Println("leaf node header size : ", unsafe.Sizeof(Node{})+8)
+		fmt.Println("internal node  header size : ", unsafe.Sizeof(Node{})+8)
+		fmt.Println("max cell per leaf node : ", MAX_CELL_PER_LEAF_NODE)
+		fmt.Println("max cell per internal  node : ", MAX_CELL_PER_INTERNAL_NODE)
+		fmt.Println()
 	default:
 		fmt.Println("unrecognized command : " + op)
 	}
@@ -502,7 +517,6 @@ func execute_statement(t *Table, smt Statement) {
 		}
 		check(err)
 		page.insert_cell(cursor, &Cell{uint32(smt.row.id), smt.row})
-		page.cell_nums++
 	}
 
 	select_func := func() {
@@ -545,9 +559,10 @@ func open_DB(file string) *Table {
 func close_DB(t *Table) {
 	// * for now,only one node for a table
 	// * flush rows not in a full page
-	t.pager.flush_page(int(t.root_page))
-	err := t.pager.fd.Close()
-	check(err)
+	for i := 0; i < int(t.pager.page_num); i++ {
+		t.pager.flush_page(i)
+	}
+	t.pager.fd.Close()
 }
 
 func handle_request(input string, T *Table) {
@@ -565,14 +580,48 @@ func handle_request(input string, T *Table) {
 
 func main() {
 	// scan := bufio.NewScanner(os.Stdin)
-	input := "insert 21 aa bb"
 	T := open_DB("stu.db")
+	input := "insert 21 aa bb"
 	smt, err := prepare_statement(input)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	execute_statement(T, smt)
+
+	input2 := "insert 22 cc dd"
+	smt, err = prepare_statement(input2)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	execute_statement(T, smt)
+
+	input3 := "insert 30 cc dd"
+	smt, err = prepare_statement(input3)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	execute_statement(T, smt)
+
+	p, err := T.pager.get_leaf_node(0)
+	check(err)
+	fmt.Println(p.cell_nums)
+
+	p1, err := T.pager.get_leaf_node(1)
+	check(err)
+	fmt.Println(p1.cell_nums)
+
+	input4 := "select"
+	smt, err = prepare_statement(input4)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	execute_statement(T, smt)
+
+	close_DB(T)
 	// fmt.Println(unsafe.Sizeof(LeafNode{}))
 	// for {
 	// 	fmt.Print(PROMPT)

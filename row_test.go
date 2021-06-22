@@ -9,7 +9,7 @@ import (
 func TestRow(t *testing.T) {
 	os.Truncate("stu.db", 0)
 	table := open_DB("stu.db")
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 45; i++ {
 		query := fmt.Sprintf("insert %d vega lee@qq.com", i+1)
 		smt, err := prepare_statement(query)
 		if err != nil {
@@ -17,6 +17,14 @@ func TestRow(t *testing.T) {
 		}
 		execute_statement(table, smt)
 	}
+
+	// input2 := "select"
+	// smt, err := prepare_statement(input2)
+	// if err != nil {
+	// 	fmt.Println(err)
+	// 	return
+	// }
+	// execute_statement(table, smt)
 	close_DB(table)
 
 	table = open_DB("stu.db")
